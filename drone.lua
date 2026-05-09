@@ -646,6 +646,80 @@ local function isHomeStorageDown(name)
   return string.find(name, "chest", 1, true) ~= nil or string.find(name, "barrel", 1, true) ~= nil
 end
 
+local function snapCkLogistics(logistics)
+  if type(logistics) ~= "table" then
+    return
+  end
+  state.ckLogistics = state.ckLogistics or {}
+  if logistics.homeTurtleStandWorld then
+    state.ckLogistics.homeTurtleStandWorld = logistics.homeTurtleStandWorld
+  end
+  if logistics.homeChestWorld then
+    state.ckLogistics.homeChestWorld = logistics.homeChestWorld
+  end
+  if logistics.centralWorld then
+    state.ckLogistics.centralWorld = logistics.centralWorld
+  end
+end
+
+local function walkGpsToward(tx, ty, tz, maxSteps)
+  maxSteps = maxSteps or 512
+  for _ = 1, maxSteps do
+    local gx, gy, gz = gps.locate(2, false)
+    if not gx then
+      return false
+    end
+    if gx == tx and gy == ty and gz == tz then
+      return true
+    end
+    if gx < tx then
+      faceDir(1)
+      local ok = forward()
+      if not ok then return false end
+    elseif gx > tx then
+      faceDir(3)
+      local ok = forward()
+      if not ok then return false end
+    elseif gz < tz then
+      faceDir(2)
+      local ok = forward()
+      if not ok then return false end
+    elseif gz > tz then
+      faceDir(0)
+      local ok = forward()
+      if not ok then return false end
+    elseif gy < ty then
+      if not up() then return false end
+    elseif gy > ty then
+      if not down() then return false end
+    else
+      return false
+    end
+  end
+  return false
+end
+
+local function ensureHomeChestAccessible()
+  goHome()
+  local block = inspectDown()
+  if block and isHomeStorageDown(block) then
+    return true
+  end
+  local tw = state.ckLogistics and state.ckLogistics.homeTurtleStandWorld
+  if not tw or tw.x == nil or tw.y == nil or tw.z == nil then
+    return false
+  end
+  if not walkGpsToward(tw.x, tw.y, tw.z, 512) then
+    return false
+  end
+  state.pos.x = 0
+  state.pos.y = 0
+  state.pos.z = 0
+  save()
+  block = inspectDown()
+  return block and isHomeStorageDown(block)
+end
+
 local function cloneChestList(list)
   if not list then
     return nil
@@ -660,7 +734,9 @@ local function cloneChestList(list)
 end
 
 local function getChestSnapshot()
-  goHome()
+  if not ensureHomeChestAccessible() then
+    return nil, nil, "home_chest_missing"
+  end
   local block = inspectDown()
   if not block or not isHomeStorageDown(block) then
     return nil, nil, "home_chest_missing"
@@ -710,7 +786,9 @@ local function findSlotForPull(name)
 end
 
 local function transferNamedFromChest(name, needMore)
-  goHome()
+  if not ensureHomeChestAccessible() then
+    return false
+  end
   if needMore <= 0 then
     return true
   end
@@ -833,7 +911,10 @@ local function consolidateStacks()
 end
 
 local function depositAllNonFuel()
-  goHome()
+  if not ensureHomeChestAccessible() then
+    log("deposit skip no home chest")
+    return
+  end
   consolidateStacks()
   for i = 1, 16 do
     local d = turtle.getItemDetail(i)
@@ -1186,7 +1267,15 @@ if not discover() then
 end
 log("register to central id=" .. tostring(state.server))
 send("register", {pos = state.pos, fuel = turtle.getFuelLevel(), anchorHome = (state.pos.x == 0 and state.pos.y == 0 and state.pos.z == 0), capabilities = state.capabilities})
-sleep(0.3)
+local regDeadline = os.clock() + 3
+while os.clock() < regDeadline do
+  local rid, rmsg = recv(0.35)
+  if rid and rmsg and rmsg.k == "register_ack" then
+    applyCanonical(rmsg.d and rmsg.d.canonPos)
+    snapCkLogistics(rmsg.d and rmsg.d.logistics)
+    break
+  end
+end
 pushChestToCentral()
 local hb = 0
 while true do
@@ -1222,6 +1311,7 @@ while true do
     state.server = id
     if msg.k == "register_ack" or msg.k == "heartbeat_ack" then
       applyCanonical(msg.d and msg.d.canonPos)
+      snapCkLogistics(msg.d and msg.d.logistics)
     end
     if msg.k == "task" then
       state.task = msg.d.task

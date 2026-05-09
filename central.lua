@@ -39,6 +39,9 @@ local state = {
   world = {voxels = {}, updatedAt = 0, blocksByType = {}},
   logistics = {
     home = {x = 0, y = 0, z = 0},
+    centralWorld = nil,
+    homeChestWorld = nil,
+    homeTurtleStandWorld = nil,
     farm = {x = FARM_CX, y = 0, z = FARM_CZ},
     furnace = {x = 2, y = 0, z = 0},
     smeltApproach = {x = 1, y = 0, z = 0},
@@ -75,6 +78,19 @@ local function openModem()
     end
   end
   return false
+end
+
+local function refreshGpsLogistics()
+  local gx, gy, gz
+  local ok = pcall(function()
+    gx, gy, gz = gps.locate(8, false)
+  end)
+  if ok and gx and gy and gz then
+    state.logistics.centralWorld = {x = gx, y = gy, z = gz}
+    state.logistics.homeChestWorld = {x = gx - 1, y = gy - 1, z = gz - 1}
+    state.logistics.homeTurtleStandWorld = {x = gx - 1, y = gy, z = gz - 1}
+    log("gps chest_block=" .. tostring(gx - 1) .. "," .. tostring(gy - 1) .. "," .. tostring(gz - 1))
+  end
 end
 
 local function loadState()
@@ -1082,10 +1098,12 @@ if not openModem() then
 end
 loadState()
 sanitizeTaskPayloads()
+refreshGpsLogistics()
 rednet.host(PROTOCOL, "central")
 log("Swarm central online mapCells=" .. tostring(mapCountKnown()) .. " boot_done=" .. tostring(state.boot and state.boot.done))
 local lastTick = os.clock()
 local lastSave = os.clock()
+local lastGps = os.clock()
 while true do
   local mid, msg = rednet.receive(PROTOCOL, 0.2)
   if mid then
@@ -1106,5 +1124,9 @@ while true do
   if os.clock() - lastSave > SAVE_INTERVAL then
     saveState()
     lastSave = os.clock()
+  end
+  if os.clock() - lastGps > 45 then
+    refreshGpsLogistics()
+    lastGps = os.clock()
   end
 end
