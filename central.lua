@@ -19,6 +19,16 @@ local FARM_SLOTS = {
   {2, 2}, {2, 4}, {2, 6}, {4, 2}, {4, 4}, {4, 6}, {6, 2}, {6, 4}, {6, 6},
 }
 
+local function cloneFarmSlots(slots)
+  local out = {}
+  for i, row in ipairs(slots or {}) do
+    if type(row) == "table" then
+      out[i] = {row[1], row[2]}
+    end
+  end
+  return out
+end
+
 local state = {
   seq = 0,
   drones = {},
@@ -84,7 +94,21 @@ local function loadState()
     state.planner = state.planner or {lastPlan = 0, mineStripIndex = 0, exploreDir = 0}
     state.farm = state.farm or {built = false, slots = {}}
     if not state.farm.slots or #state.farm.slots == 0 then
-      state.farm.slots = FARM_SLOTS
+      state.farm.slots = cloneFarmSlots(FARM_SLOTS)
+    else
+      state.farm.slots = cloneFarmSlots(state.farm.slots)
+    end
+  end
+end
+
+local function sanitizeTaskPayloads()
+  for _, t in ipairs(state.tasks) do
+    if t.payload then
+      t.payload.logistics = nil
+      t.payload.farm = nil
+      if t.payload.slots and type(t.payload.slots) == "table" then
+        t.payload.slots = cloneFarmSlots(t.payload.slots)
+      end
     end
   end
 end
@@ -390,13 +414,13 @@ local function planTick()
       enqueue("mine", {steps = 8, strip = (state.planner.mineStripIndex or 0)}, 55, nil)
     end
   end
-  state.farm = state.farm or {built = false, slots = FARM_SLOTS}
+  state.farm = state.farm or {built = false, slots = cloneFarmSlots(FARM_SLOTS)}
   if not state.farm.slots or #state.farm.slots == 0 then
-    state.farm.slots = FARM_SLOTS
+    state.farm.slots = cloneFarmSlots(FARM_SLOTS)
   end
   if not state.farm.built then
     if chestSaplingCount() >= 6 and chestCount("minecraft:dirt") >= 20 and not openTaskByExclusive("farm_build") then
-      enqueue("farm_build", {slots = state.farm.slots}, 87, "farm_build")
+      enqueue("farm_build", {slots = cloneFarmSlots(state.farm.slots)}, 87, "farm_build")
     end
     if not openTaskByKind("farm_replant") then
       enqueue("farm_replant", {x = FARM_CX, z = FARM_CZ}, 54, nil)
@@ -406,7 +430,7 @@ local function planTick()
     end
   else
     if not openTaskByExclusive("farm_cycle") then
-      enqueue("farm_cycle", {slots = state.farm.slots}, 64, "farm_cycle")
+      enqueue("farm_cycle", {slots = cloneFarmSlots(state.farm.slots)}, 64, "farm_cycle")
     end
   end
   local canCraftAdvanced = chestCount("minecraft:redstone") > 0 and chestCount("minecraft:glass_pane") > 0
@@ -489,9 +513,6 @@ local function pickTask(drone)
             d.busy = t.kind
           end
           log("assign " .. t.kind .. " -> " .. tostring(drone.id))
-          t.payload = t.payload or {}
-          t.payload.logistics = state.logistics
-          t.payload.farm = {cx = FARM_CX, cz = FARM_CZ, r = FARM_RADIUS}
           return t
         end
       end
@@ -568,7 +589,11 @@ local function markTaskDone(taskId, droneId)
       t.doneAt = os.epoch("utc")
       if t.kind == "farm_build" then
         state.farm.built = true
-        state.farm.slots = (t.payload and t.payload.slots) or state.farm.slots or FARM_SLOTS
+        if t.payload and t.payload.slots and #t.payload.slots > 0 then
+          state.farm.slots = cloneFarmSlots(t.payload.slots)
+        else
+          state.farm.slots = cloneFarmSlots(state.farm.slots or FARM_SLOTS)
+        end
         log("farm_build finished slots=" .. tostring(#state.farm.slots))
       end
       log("done " .. t.kind .. " by " .. tostring(droneId))
@@ -633,7 +658,7 @@ local function handle(id, msg)
     if not t then
       log("no_task_for drone=" .. tostring(id))
     end
-    send(id, "task", {task = t, canonPos = d.canon, logistics = state.logistics})
+    send(id, "task", {task = t, canonPos = d.canon})
     return
   end
   if msg.k == "done" then
@@ -651,6 +676,7 @@ if not openModem() then
   error("No modem")
 end
 loadState()
+sanitizeTaskPayloads()
 rednet.host(PROTOCOL, "central")
 log("Swarm central online mapCells=" .. tostring(mapCountKnown()))
 local lastTick = os.clock()

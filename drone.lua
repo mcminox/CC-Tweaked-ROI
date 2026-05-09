@@ -650,8 +650,30 @@ local function craft(name)
   return false, "craft_failed"
 end
 
+local function consolidateStacks()
+  for _ = 1, 2 do
+    for dest = 1, 16 do
+      if turtle.getItemCount(dest) > 0 then
+        local dd = turtle.getItemDetail(dest)
+        if dd then
+          for src = 1, 16 do
+            if src ~= dest and turtle.getItemCount(src) > 0 then
+              local sd = turtle.getItemDetail(src)
+              if sd and sd.name == dd.name then
+                turtle.select(src)
+                turtle.transferTo(dest)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
 local function depositAllNonFuel()
   goHome()
+  consolidateStacks()
   for i = 1, 16 do
     local d = turtle.getItemDetail(i)
     if d and not string.find(d.name, "coal", 1, true) and not string.find(d.name, "charcoal", 1, true) then
@@ -786,8 +808,12 @@ local function taskCraft(payload)
   if r == "turtle_advanced" and countByName("computercraft:computer_advanced") == 0 then
     local ok, e = craft("computer_advanced")
     if not ok then return false, e end
+    depositAllNonFuel()
   end
-  return craft(r)
+  local ok2, e2 = craft(r)
+  if not ok2 then return false, e2 end
+  depositAllNonFuel()
+  return true
 end
 
 local function taskSetupFurnace(t)
