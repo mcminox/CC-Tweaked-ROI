@@ -576,10 +576,55 @@ local function scanChest()
   return summary
 end
 
-local function pullAnyFromChest(amount)
+local function findSlotForPull(name)
+  for i = 1, 16 do
+    local d = turtle.getItemDetail(i)
+    if d and d.name == name and turtle.getItemCount(i) < 64 then
+      return i
+    end
+  end
+  return findEmptySlot()
+end
+
+local function transferNamedFromChest(name, needMore)
   goHome()
-  turtle.select(findEmptySlot() or 1)
-  return turtle.suckDown(amount or 64)
+  if needMore <= 0 then
+    return true
+  end
+  local inv = peripheral.wrap("bottom")
+  if not inv or type(inv.list) ~= "function" then
+    return false
+  end
+  local list = inv.list()
+  for slot, stack in pairs(list) do
+    if stack and stack.name == name then
+      local pull = math.min(needMore, stack.count)
+      if type(inv.pushItems) == "function" then
+        local ok, moved = pcall(function()
+          return inv.pushItems("up", slot, pull)
+        end)
+        if ok and type(moved) == "number" and moved > 0 then
+          return true
+        end
+        local dest = findSlotForPull(name)
+        if dest then
+          ok, moved = pcall(function()
+            return inv.pushItems("up", slot, pull, dest)
+          end)
+          if ok and type(moved) == "number" and moved > 0 then
+            return true
+          end
+        end
+      end
+      local dest = findSlotForPull(name)
+      if not dest then
+        return false
+      end
+      turtle.select(dest)
+      return turtle.suckDown(pull)
+    end
+  end
+  return false
 end
 
 local function ensureItemsFromChest(req)
@@ -588,27 +633,20 @@ local function ensureItemsFromChest(req)
     return false, err
   end
   for name, needed in pairs(req) do
-    local have = countByName(name)
-    if have < needed then
-      local available = chest[name] or 0
-      if available <= 0 then
-        return false, "missing_in_chest:" .. name
-      end
-      local tries = 0
-      while countByName(name) < needed and tries < 64 do
-        tries = tries + 1
-        local empty = findEmptySlot()
-        if not empty then
-          return false, "inventory_full_for:" .. name
-        end
-        turtle.select(empty)
-        if not pullAnyFromChest(1) then
-          break
-        end
-      end
-      if countByName(name) < needed then
+    local have0 = countByName(name)
+    if have0 < needed and (chest[name] or 0) < needed - have0 then
+      return false, "missing_in_chest:" .. name
+    end
+    local tries = 0
+    while countByName(name) < needed and tries < 96 do
+      tries = tries + 1
+      local have = countByName(name)
+      if not transferNamedFromChest(name, needed - have) then
         return false, "cannot_pull_required:" .. name
       end
+    end
+    if countByName(name) < needed then
+      return false, "cannot_pull_required:" .. name
     end
   end
   return true
