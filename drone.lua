@@ -646,6 +646,19 @@ local function isHomeStorageDown(name)
   return string.find(name, "chest", 1, true) ~= nil or string.find(name, "barrel", 1, true) ~= nil
 end
 
+local function getTurtleWorldCoords()
+  if commands and type(commands.getBlockPosition) == "function" then
+    local ok, x, y, z = pcall(commands.getBlockPosition)
+    if ok and x and y and z then
+      return x, y, z
+    end
+  end
+  if gps and type(gps.locate) == "function" then
+    return gps.locate(2, false)
+  end
+  return nil
+end
+
 local function snapCkLogistics(logistics)
   if type(logistics) ~= "table" then
     return
@@ -665,7 +678,7 @@ end
 local function walkGpsToward(tx, ty, tz, maxSteps)
   maxSteps = maxSteps or 512
   for _ = 1, maxSteps do
-    local gx, gy, gz = gps.locate(2, false)
+    local gx, gy, gz = getTurtleWorldCoords()
     if not gx then
       return false
     end

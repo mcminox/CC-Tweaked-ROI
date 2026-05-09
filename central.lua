@@ -80,16 +80,26 @@ local function openModem()
   return false
 end
 
+local function getComputerWorldCoords()
+  if commands and type(commands.getBlockPosition) == "function" then
+    local ok, x, y, z = pcall(commands.getBlockPosition)
+    if ok and x and y and z then
+      return x, y, z
+    end
+  end
+  if gps and type(gps.locate) == "function" then
+    return gps.locate(8, false)
+  end
+  return nil
+end
+
 local function refreshGpsLogistics()
-  local gx, gy, gz
-  local ok = pcall(function()
-    gx, gy, gz = gps.locate(8, false)
-  end)
-  if ok and gx and gy and gz then
+  local gx, gy, gz = getComputerWorldCoords()
+  if gx and gy and gz then
     state.logistics.centralWorld = {x = gx, y = gy, z = gz}
     state.logistics.homeChestWorld = {x = gx - 1, y = gy - 1, z = gz - 1}
     state.logistics.homeTurtleStandWorld = {x = gx - 1, y = gy, z = gz - 1}
-    log("gps chest_block=" .. tostring(gx - 1) .. "," .. tostring(gy - 1) .. "," .. tostring(gz - 1))
+    log("home_chest_block=" .. tostring(gx - 1) .. "," .. tostring(gy - 1) .. "," .. tostring(gz - 1))
   end
 end
 
