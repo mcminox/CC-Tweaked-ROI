@@ -42,6 +42,7 @@ local state = {
     centralWorld = nil,
     homeChestWorld = nil,
     homeTurtleStandWorld = nil,
+    homeTurtleBelowChestWorld = nil,
     farm = {x = FARM_CX, y = 0, z = FARM_CZ},
     furnace = {x = 2, y = 0, z = 0},
     smeltApproach = {x = 1, y = 0, z = 0},
@@ -97,9 +98,10 @@ local function refreshGpsLogistics()
   local gx, gy, gz = getComputerWorldCoords()
   if gx and gy and gz then
     state.logistics.centralWorld = {x = gx, y = gy, z = gz}
-    state.logistics.homeChestWorld = {x = gx - 1, y = gy - 1, z = gz - 1}
-    state.logistics.homeTurtleStandWorld = {x = gx - 1, y = gy, z = gz - 1}
-    log("home_chest_block=" .. tostring(gx - 1) .. "," .. tostring(gy - 1) .. "," .. tostring(gz - 1))
+    state.logistics.homeChestWorld = {x = gx, y = gy, z = gz - 1}
+    state.logistics.homeTurtleStandWorld = {x = gx, y = gy + 1, z = gz - 1}
+    state.logistics.homeTurtleBelowChestWorld = {x = gx, y = gy - 1, z = gz - 1}
+    log("home_chest_block=" .. tostring(gx) .. "," .. tostring(gy) .. "," .. tostring(gz - 1))
   end
 end
 

@@ -6,7 +6,7 @@ local FUEL_RETURN = 160
 local MIN_FUEL_REFUEL = 120
 
 local stateFile = "swarm_state.db"
-local state = {server = nil, task = nil, pos = {x = 0, y = 0, z = 0, dir = 0}, hbTick = 0}
+local state = {server = nil, task = nil, pos = {x = 0, y = 0, z = 0, dir = 0}, hbTick = 0, homeChestSide = nil}
 local protectedFragments = {
   "computercraft:computer",
   "computercraft:turtle",
@@ -152,6 +152,12 @@ end
 
 local function inspectDown()
   local ok, data = turtle.inspectDown()
+  if not ok then return nil end
+  return data and data.name
+end
+
+local function inspectUpBlock()
+  local ok, data = turtle.inspectUp()
   if not ok then return nil end
   return data and data.name
 end
@@ -639,11 +645,48 @@ local function countByName(name)
   return n
 end
 
-local function isHomeStorageDown(name)
+local function isHomeStorageName(name)
   if not name then
     return false
   end
   return string.find(name, "chest", 1, true) ~= nil or string.find(name, "barrel", 1, true) ~= nil
+end
+
+local function refreshHomeChestSideFromInspect()
+  local dn = inspectDown()
+  local un = inspectUpBlock()
+  if isHomeStorageName(dn) and not isHomeStorageName(un) then
+    state.homeChestSide = "below"
+  elseif isHomeStorageName(un) and not isHomeStorageName(dn) then
+    state.homeChestSide = "above"
+  elseif isHomeStorageName(dn) then
+    state.homeChestSide = "below"
+  elseif isHomeStorageName(un) then
+    state.homeChestSide = "above"
+  end
+end
+
+local function chestOkAtHome()
+  if state.homeChestSide == "above" then
+    return isHomeStorageName(inspectUpBlock())
+  end
+  return isHomeStorageName(inspectDown())
+end
+
+local function chestInvWrapSide()
+  return (state.homeChestSide == "above") and "top" or "bottom"
+end
+
+local function getChestPeripheral()
+  return peripheral.wrap(chestInvWrapSide())
+end
+
+local function dropToChest()
+  if state.homeChestSide == "above" then
+    turtle.dropUp()
+  else
+    turtle.dropDown()
+  end
 end
 
 local function getTurtleWorldCoords()
@@ -666,6 +709,9 @@ local function snapCkLogistics(logistics)
   state.ckLogistics = state.ckLogistics or {}
   if logistics.homeTurtleStandWorld then
     state.ckLogistics.homeTurtleStandWorld = logistics.homeTurtleStandWorld
+  end
+  if logistics.homeTurtleBelowChestWorld then
+    state.ckLogistics.homeTurtleBelowChestWorld = logistics.homeTurtleBelowChestWorld
   end
   if logistics.homeChestWorld then
     state.ckLogistics.homeChestWorld = logistics.homeChestWorld
@@ -714,11 +760,16 @@ end
 
 local function ensureHomeChestAccessible()
   goHome()
-  local block = inspectDown()
-  if block and isHomeStorageDown(block) then
+  refreshHomeChestSideFromInspect()
+  if chestOkAtHome() then
     return true
   end
-  local tw = state.ckLogistics and state.ckLogistics.homeTurtleStandWorld
+  local tw = nil
+  if state.homeChestSide == "above" then
+    tw = state.ckLogistics and state.ckLogistics.homeTurtleBelowChestWorld
+  else
+    tw = state.ckLogistics and state.ckLogistics.homeTurtleStandWorld
+  end
   if not tw or tw.x == nil or tw.y == nil or tw.z == nil then
     return false
   end
@@ -729,8 +780,8 @@ local function ensureHomeChestAccessible()
   state.pos.y = 0
   state.pos.z = 0
   save()
-  block = inspectDown()
-  return block and isHomeStorageDown(block)
+  refreshHomeChestSideFromInspect()
+  return chestOkAtHome()
 end
 
 local function cloneChestList(list)
@@ -750,11 +801,11 @@ local function getChestSnapshot()
   if not ensureHomeChestAccessible() then
     return nil, nil, "home_chest_missing"
   end
-  local block = inspectDown()
-  if not block or not isHomeStorageDown(block) then
+  refreshHomeChestSideFromInspect()
+  if not chestOkAtHome() then
     return nil, nil, "home_chest_missing"
   end
-  local inv = peripheral.wrap("bottom")
+  local inv = getChestPeripheral()
   if not inv or type(inv.list) ~= "function" then
     return nil, nil, "home_chest_no_inventory_api"
   end
@@ -805,17 +856,18 @@ local function transferNamedFromChest(name, needMore)
   if needMore <= 0 then
     return true
   end
-  local inv = peripheral.wrap("bottom")
+  local inv = getChestPeripheral()
   if not inv or type(inv.list) ~= "function" then
     return false
   end
+  local intoTurtle = (state.homeChestSide == "above") and "down" or "up"
   local list = inv.list()
   for slot, stack in pairs(list) do
     if stack and stack.name == name then
       local pull = math.min(needMore, stack.count)
       if type(inv.pushItems) == "function" then
         local ok, moved = pcall(function()
-          return inv.pushItems("up", slot, pull)
+          return inv.pushItems(intoTurtle, slot, pull)
         end)
         if ok and type(moved) == "number" and moved > 0 then
           return true
@@ -823,7 +875,7 @@ local function transferNamedFromChest(name, needMore)
         local dest = findSlotForPull(name)
         if dest then
           ok, moved = pcall(function()
-            return inv.pushItems("up", slot, pull, dest)
+            return inv.pushItems(intoTurtle, slot, pull, dest)
           end)
           if ok and type(moved) == "number" and moved > 0 then
             return true
@@ -835,6 +887,9 @@ local function transferNamedFromChest(name, needMore)
         return false
       end
       turtle.select(dest)
+      if state.homeChestSide == "above" then
+        return turtle.suckUp(pull)
+      end
       return turtle.suckDown(pull)
     end
   end
@@ -867,7 +922,7 @@ local function ensureItemsFromChest(req)
 end
 
 local function moveItem(name, slot)
-  if turtle.getItemCount(slot) > 0 then turtle.select(slot) turtle.dropDown() end
+  if turtle.getItemCount(slot) > 0 then turtle.select(slot) dropToChest() end
   for i = 1, 16 do
     local d = turtle.getItemDetail(i)
     if d and d.name == name and i ~= slot then
@@ -891,7 +946,7 @@ local function craft(name)
     return false, reqErr
   end
   for i = 1, 9 do
-    if turtle.getItemCount(i) > 0 then turtle.select(i) turtle.dropDown() end
+    if turtle.getItemCount(i) > 0 then turtle.select(i) dropToChest() end
   end
   for i = 1, 9 do
     local item = r[i]
@@ -933,7 +988,7 @@ local function depositAllNonFuel()
     local d = turtle.getItemDetail(i)
     if d and not string.find(d.name, "coal", 1, true) and not string.find(d.name, "charcoal", 1, true) then
       turtle.select(i)
-      turtle.dropDown()
+      dropToChest()
     end
   end
 end
@@ -1273,6 +1328,10 @@ end
 
 if not openModem() then error("No modem") end
 load()
+refreshHomeChestSideFromInspect()
+if state.homeChestSide then
+  log("startup chest " .. state.homeChestSide)
+end
 state.capabilities = state.capabilities or computeCapabilities()
 if not discover() then
   log("Waiting for central...")
