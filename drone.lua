@@ -263,6 +263,83 @@ local function goHome()
   end
 end
 
+local function mapDeltaAtFoot()
+  local d = {}
+  local px, py, pz = state.pos.x, state.pos.y, state.pos.z
+  d[#d + 1] = {x = px, y = py, z = pz, t = "air"}
+  local saved = state.pos.dir
+  for i = 0, 3 do
+    faceDir(i)
+    local fn = inspectFront()
+    if fn then
+      local ox, oy, oz = frontOffset()
+      d[#d + 1] = {x = px + ox, y = py + oy, z = pz + oz, t = fn}
+    end
+  end
+  faceDir(saved)
+  local uok, udat = turtle.inspectUp()
+  if uok and udat and udat.name then
+    d[#d + 1] = {x = px, y = py + 1, z = pz, t = udat.name}
+  end
+  local dn = inspectDown()
+  if dn then
+    d[#d + 1] = {x = px, y = py - 1, z = pz, t = dn}
+  end
+  return d
+end
+
+local function mapVerticalSteps(upMax, downMax)
+  local acc = {}
+  local y0 = state.pos.y
+  local function merge(t)
+    for _, v in ipairs(t) do
+      acc[#acc + 1] = v
+    end
+  end
+  merge(mapDeltaAtFoot())
+  for _ = 1, upMax do
+    if turtle.detectUp() then
+      break
+    end
+    if not turtle.up() then
+      break
+    end
+    state.pos.y = state.pos.y + 1
+    merge(mapDeltaAtFoot())
+  end
+  while state.pos.y > y0 do
+    if not turtle.down() then
+      break
+    end
+    state.pos.y = state.pos.y - 1
+  end
+  for _ = 1, downMax do
+    if turtle.detectDown() then
+      break
+    end
+    if not turtle.down() then
+      break
+    end
+    state.pos.y = state.pos.y - 1
+    merge(mapDeltaAtFoot())
+  end
+  while state.pos.y < y0 do
+    if not turtle.up() then
+      break
+    end
+    state.pos.y = state.pos.y + 1
+  end
+  save()
+  return acc
+end
+
+local function mapDelta()
+  if (state.hbTick or 0) % 3 ~= 0 then
+    return mapDeltaAtFoot()
+  end
+  return mapVerticalSteps(12, 4)
+end
+
 local function walkToXZ(tx, tz)
   local guard = 0
   while (state.pos.x ~= tx or state.pos.z ~= tz) and guard < 800 do
@@ -1098,83 +1175,6 @@ local function execute(task)
   if task.kind == "bootstrap" then return taskBootstrap() end
   if task.kind == "return" then goHome() return true end
   return false, "unknown_task"
-end
-
-local function mapDeltaAtFoot()
-  local d = {}
-  local px, py, pz = state.pos.x, state.pos.y, state.pos.z
-  d[#d + 1] = {x = px, y = py, z = pz, t = "air"}
-  local saved = state.pos.dir
-  for i = 0, 3 do
-    faceDir(i)
-    local fn = inspectFront()
-    if fn then
-      local ox, oy, oz = frontOffset()
-      d[#d + 1] = {x = px + ox, y = py + oy, z = pz + oz, t = fn}
-    end
-  end
-  faceDir(saved)
-  local uok, udat = turtle.inspectUp()
-  if uok and udat and udat.name then
-    d[#d + 1] = {x = px, y = py + 1, z = pz, t = udat.name}
-  end
-  local dn = inspectDown()
-  if dn then
-    d[#d + 1] = {x = px, y = py - 1, z = pz, t = dn}
-  end
-  return d
-end
-
-local function mapVerticalSteps(upMax, downMax)
-  local acc = {}
-  local y0 = state.pos.y
-  local function merge(t)
-    for _, v in ipairs(t) do
-      acc[#acc + 1] = v
-    end
-  end
-  merge(mapDeltaAtFoot())
-  for _ = 1, upMax do
-    if turtle.detectUp() then
-      break
-    end
-    if not turtle.up() then
-      break
-    end
-    state.pos.y = state.pos.y + 1
-    merge(mapDeltaAtFoot())
-  end
-  while state.pos.y > y0 do
-    if not turtle.down() then
-      break
-    end
-    state.pos.y = state.pos.y - 1
-  end
-  for _ = 1, downMax do
-    if turtle.detectDown() then
-      break
-    end
-    if not turtle.down() then
-      break
-    end
-    state.pos.y = state.pos.y - 1
-    merge(mapDeltaAtFoot())
-  end
-  while state.pos.y < y0 do
-    if not turtle.up() then
-      break
-    end
-    state.pos.y = state.pos.y + 1
-  end
-  save()
-  return acc
-end
-
-local function mapDelta()
-  if (state.hbTick or 0) % 3 ~= 0 then
-    return mapDeltaAtFoot()
-  end
-  return mapVerticalSteps(12, 4)
 end
 
 if not openModem() then error("No modem") end
