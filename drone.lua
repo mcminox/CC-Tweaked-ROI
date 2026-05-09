@@ -856,44 +856,71 @@ local function transferNamedFromChest(name, needMore)
   if needMore <= 0 then
     return true
   end
-  local inv = getChestPeripheral()
-  if not inv or type(inv.list) ~= "function" then
-    return false
-  end
   local intoTurtle = (state.homeChestSide == "above") and "down" or "up"
-  local list = inv.list()
-  for slot, stack in pairs(list) do
-    if stack and stack.name == name then
-      local pull = math.min(needMore, stack.count)
-      if type(inv.pushItems) == "function" then
-        local ok, moved = pcall(function()
-          return inv.pushItems(intoTurtle, slot, pull)
-        end)
-        if ok and type(moved) == "number" and moved > 0 then
-          return true
-        end
+  local left = needMore
+  local guard = 0
+  while left > 0 and guard < 128 do
+    guard = guard + 1
+    local inv = getChestPeripheral()
+    if not inv or type(inv.list) ~= "function" then
+      return false
+    end
+    local foundSlot, stack = nil, nil
+    for slot, st in pairs(inv.list()) do
+      if st and st.name == name and (st.count or 0) > 0 then
+        foundSlot = slot
+        stack = st
+        break
+      end
+    end
+    if not foundSlot then
+      return false
+    end
+    local pull = math.min(left, stack.count)
+    local moved = 0
+    if type(inv.pushItems) == "function" then
+      local ok, n = pcall(function()
+        return inv.pushItems(intoTurtle, foundSlot, pull)
+      end)
+      if ok and type(n) == "number" and n > 0 then
+        moved = n
+      end
+      if moved == 0 then
         local dest = findSlotForPull(name)
         if dest then
-          ok, moved = pcall(function()
-            return inv.pushItems(intoTurtle, slot, pull, dest)
+          ok, n = pcall(function()
+            return inv.pushItems(intoTurtle, foundSlot, pull, dest)
           end)
-          if ok and type(moved) == "number" and moved > 0 then
-            return true
+          if ok and type(n) == "number" and n > 0 then
+            moved = n
           end
         end
       end
+    end
+    if moved == 0 then
       local dest = findSlotForPull(name)
       if not dest then
         return false
       end
+      local before = countByName(name)
       turtle.select(dest)
+      local okSuck = false
       if state.homeChestSide == "above" then
-        return turtle.suckUp(pull)
+        okSuck = turtle.suckUp(pull)
+      else
+        okSuck = turtle.suckDown(pull)
       end
-      return turtle.suckDown(pull)
+      if not okSuck then
+        return false
+      end
+      moved = countByName(name) - before
+      if moved <= 0 then
+        return false
+      end
     end
+    left = left - moved
   end
-  return false
+  return left == 0
 end
 
 local function ensureItemsFromChest(req)
