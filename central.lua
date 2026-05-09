@@ -16,6 +16,8 @@ local COBBLE_SOFT_CAP = 192
 local COBBLE_NEED_FURNACE = 8
 local CHARCOAL_TARGET = 64
 local COAL_SOFT_CAP = 128
+local MAP_EXPLORE_GOAL = 160
+local STRATEGIC_LOG_EVERY = 18
 local FARM_SLOTS = {
   {2, 2}, {2, 4}, {2, 6}, {4, 2}, {4, 4}, {4, 6}, {6, 2}, {6, 4}, {6, 6},
 }
@@ -34,7 +36,7 @@ local state = {
   seq = 0,
   drones = {},
   tasks = {},
-  world = {voxels = {}, updatedAt = 0},
+  world = {voxels = {}, updatedAt = 0, blocksByType = {}},
   logistics = {
     home = {x = 0, y = 0, z = 0},
     farm = {x = FARM_CX, y = 0, z = FARM_CZ},
@@ -52,6 +54,8 @@ local state = {
     lastPlan = 0,
     mineStripIndex = 0,
     exploreDir = 0,
+    strategicTick = 0,
+    lastStage = "",
   },
   farm = {built = false, slots = {}},
   boot = {done = false},
@@ -89,8 +93,9 @@ local function loadState()
     state.seq = state.seq or 0
     state.drones = state.drones or {}
     state.tasks = state.tasks or {}
-    state.world = state.world or {voxels = {}, updatedAt = 0}
+    state.world = state.world or {voxels = {}, updatedAt = 0, blocksByType = {}}
     state.world.voxels = state.world.voxels or {}
+    state.world.blocksByType = state.world.blocksByType or {}
     state.logistics = state.logistics or {}
     state.logistics.nodes = state.logistics.nodes or {}
     state.chest = state.chest or {}
@@ -103,6 +108,12 @@ local function loadState()
     end
     state.boot = state.boot or {done = false}
     state.inventory = state.inventory or {}
+    if next(state.world.voxels) and not next(state.world.blocksByType) then
+      for _, vv in pairs(state.world.voxels) do
+        local tn = vv.t or "unknown"
+        state.world.blocksByType[tn] = (state.world.blocksByType[tn] or 0) + 1
+      end
+    end
   end
 end
 
@@ -181,6 +192,28 @@ local function mapCountKnown()
     n = n + 1
   end
   return n
+end
+
+local function countBlocksOfType(tname)
+  if not tname or not state.world.blocksByType then
+    return 0
+  end
+  return state.world.blocksByType[tname] or 0
+end
+
+local function indexDeltaBlock(oldT, newT)
+  state.world.blocksByType = state.world.blocksByType or {}
+  if oldT and oldT ~= "" then
+    local o = (state.world.blocksByType[oldT] or 1) - 1
+    if o <= 0 then
+      state.world.blocksByType[oldT] = nil
+    else
+      state.world.blocksByType[oldT] = o
+    end
+  end
+  if newT and newT ~= "" then
+    state.world.blocksByType[newT] = (state.world.blocksByType[newT] or 0) + 1
+  end
 end
 
 local function findNearestLogOutsideFarm(fromX, fromZ)
@@ -269,6 +302,16 @@ local function chestSaplingCount()
     end
   end
   return n
+end
+
+local function chestLogsTotal()
+  local lg = 0
+  for name, c in pairs(state.chest) do
+    if string.find(name, "log", 1, true) then
+      lg = lg + (c or 0)
+    end
+  end
+  return lg
 end
 
 local function droneRole(id)
@@ -422,6 +465,189 @@ local function planNeeds()
   }
 end
 
+local function makeStrategicContext(needs)
+  return {
+    needs = needs,
+    n = onlineDroneCount(),
+    mapN = mapCountKnown(),
+    coal = chestCount("minecraft:coal") + chestCount("minecraft:charcoal"),
+    cobble = chestCount("minecraft:cobblestone") + chestCount("minecraft:stone"),
+    ironIng = chestCount("minecraft:iron_ingot"),
+    goldIng = chestCount("minecraft:gold_ingot"),
+    redstone = chestCount("minecraft:redstone"),
+    paper = chestCount("minecraft:paper"),
+    pane = chestCount("minecraft:glass_pane"),
+    disk = chestCount("computercraft:disk") or 0,
+    drive = chestCount("computercraft:disk_drive") or 0,
+    compAdv = chestCount("computercraft:computer_advanced") or 0,
+    turtleAdv = chestCount("computercraft:turtle_advanced") or 0,
+    chestItem = chestCount("minecraft:chest") or 0,
+    pearl = chestCount("minecraft:ender_pearl") or 0,
+    logs = chestLogsTotal(),
+    oreIron = countBlocksOfType("minecraft:iron_ore"),
+    oreGold = countBlocksOfType("minecraft:gold_ore"),
+    oreRed = countBlocksOfType("minecraft:redstone_ore"),
+    oreDia = countBlocksOfType("minecraft:diamond_ore"),
+  }
+end
+
+local function expansionPressure(ctx)
+  if ctx.n >= TARGET_DRONES then
+    return 0
+  end
+  return (TARGET_DRONES - ctx.n) * 6
+end
+
+local function strategicPrio(kind, ctx, payload)
+  local needs = ctx.needs
+  if not (state.boot and state.boot.done) then
+    if kind == "survey" then
+      return 97
+    end
+    if kind == "explore" then
+      return 91
+    end
+    return 35
+  end
+  if kind == "refuel" then
+    return 100
+  end
+  if needs.fuelLow and ctx.coal < 12 then
+    if kind == "farm_replant" or kind == "farm_harvest" or kind == "explore" then
+      return 28
+    end
+  end
+  if needs.needCharcoal then
+    if kind == "setup_furnace" then
+      return 94
+    end
+    if kind == "smelt_charcoal" then
+      return 92
+    end
+    if kind == "gather_log" then
+      return 90
+    end
+  end
+  if needs.needCobbleForFurnace and kind == "mine_cobble" then
+    return 89
+  end
+  if kind == "mine_cobble" then
+    local b = 74
+    if ctx.cobble < COBBLE_SOFT_CAP * 0.22 then
+      b = b + 10
+    end
+    return b
+  end
+  if kind == "mine" then
+    local b = 56
+    if ctx.cobble < COBBLE_SOFT_CAP * 0.42 then
+      b = b + 14
+    end
+    if ctx.mapN < MAP_EXPLORE_GOAL * 0.55 then
+      b = b + 5
+    end
+    if ctx.oreDia < 1 and ctx.n < TARGET_DRONES then
+      b = b + 3
+    end
+    return b
+  end
+  if kind == "explore" then
+    if ctx.mapN < MAP_EXPLORE_GOAL and ctx.cobble > COBBLE_SOFT_CAP * 0.12 then
+      return 52 + math.floor(expansionPressure(ctx) * 0.12)
+    end
+    if ctx.oreIron < 3 and ctx.ironIng < 20 then
+      return 46
+    end
+    return 36
+  end
+  if kind == "farm_build" then
+    return 88 + (chestSaplingCount() >= 12 and 4 or 0)
+  end
+  if kind == "farm_cycle" then
+    return 76
+  end
+  if kind == "farm_replant" or kind == "farm_harvest" then
+    if needs.fuelLow and ctx.coal < 16 then
+      return 22
+    end
+    if not state.farm.built and chestSaplingCount() < 4 then
+      return 26
+    end
+    return 54
+  end
+  if kind == "craft" then
+    local r = payload and payload.recipe or ""
+    local ex = expansionPressure(ctx)
+    if r == "disk" then
+      if ctx.drive > 0 and ctx.disk < 1 then
+        return 87 + math.floor(ex * 0.1)
+      end
+      return 64 + math.floor(ex * 0.08)
+    end
+    if r == "disk_drive" then
+      if ctx.ironIng > 0 and ctx.chestItem > 0 then
+        return 85 + math.floor(ex * 0.1)
+      end
+      return 61
+    end
+    if r == "wireless_modem_normal" then
+      if ctx.turtleAdv > 0 and ctx.n < TARGET_DRONES then
+        return 83
+      end
+      return 59
+    end
+    if r == "computer_advanced" then
+      return 82 + math.floor(ex * 0.12)
+    end
+    if r == "turtle_advanced" then
+      return 81 + math.floor(ex * 0.18)
+    end
+    return 55
+  end
+  if kind == "bootstrap" then
+    if ctx.turtleAdv < 1 then
+      return 42
+    end
+    return 73 + math.floor(expansionPressure(ctx) * 0.22)
+  end
+  return 50
+end
+
+local function enqueueStrategic(kind, payload, exclusive, ctx)
+  enqueue(kind, payload, strategicPrio(kind, ctx, payload), exclusive)
+end
+
+local function logStrategicStage(ctx)
+  state.planner.strategicTick = (state.planner.strategicTick or 0) + 1
+  if state.planner.strategicTick % STRATEGIC_LOG_EVERY ~= 0 then
+    return
+  end
+  local stage = "grow_base"
+  if not (state.boot and state.boot.done) then
+    stage = "boot_map"
+  elseif ctx.needs.needCharcoal or (ctx.needs.fuelLow and ctx.coal < 14) then
+    stage = "fuel_security"
+  elseif ctx.n < TARGET_DRONES and ctx.turtleAdv > 0 then
+    stage = "deploy_swarm"
+  elseif ctx.turtleAdv < 1 and (ctx.goldIng > 24 or ctx.compAdv > 0 or ctx.redstone > 2) then
+    stage = "craft_turtles"
+  elseif ctx.cobble < COBBLE_SOFT_CAP * 0.33 then
+    stage = "mine_buffer"
+  elseif state.farm.built then
+    stage = "farm_ops"
+  end
+  if stage ~= state.planner.lastStage then
+    state.planner.lastStage = stage
+    local bk = 0
+    if state.world.blocksByType then
+      for _ in pairs(state.world.blocksByType) do
+        bk = bk + 1
+      end
+    end
+    log("stage=" .. stage .. " drones=" .. tostring(ctx.n) .. "/" .. tostring(TARGET_DRONES) .. " mapCells=" .. tostring(ctx.mapN) .. " blockKinds=" .. tostring(bk) .. " cobble=" .. tostring(ctx.cobble) .. " coal=" .. tostring(ctx.coal))
+  end
+end
+
 local function planTick()
   pruneStaleMining()
   local n = onlineDroneCount()
@@ -431,21 +657,23 @@ local function planTick()
   state.boot = state.boot or {done = false}
   state.inventory = state.inventory or {}
   local needs = planNeeds()
+  local ctx = makeStrategicContext(needs)
+  logStrategicStage(ctx)
   local cobble = needs.cobble
   local coal = needs.coal
   if needs.fuelLow and not openTaskByKind("refuel") then
-    enqueue("refuel", {}, 98, nil)
+    enqueueStrategic("refuel", {}, nil, ctx)
   end
   if not checkWarmupComplete() then
     if not openTaskByExclusive("survey_pass") then
-      enqueue("survey", {
+      enqueueStrategic("survey", {
         steps = 18,
         preferDir = state.planner.exploreDir or 0,
-      }, 97, "survey_pass")
+      }, "survey_pass", ctx)
     end
     if mapCountKnown() < BOOT_MIN_VOXELS and not openTaskByKind("explore") then
       local ed = state.planner.exploreDir or 0
-      enqueue("explore", {steps = 16, preferDir = ed}, 91, nil)
+      enqueueStrategic("explore", {steps = 16, preferDir = ed}, nil, ctx)
       state.planner.exploreDir = (ed + 1) % 4
     end
     return
@@ -453,15 +681,15 @@ local function planTick()
   if needs.needCharcoal then
     if not furnacePlacedOnMap() then
       if not openTaskByExclusive("furnace_line") then
-        enqueue("setup_furnace", {fx = state.logistics.furnace.x, fz = state.logistics.furnace.z, ax = state.logistics.smeltApproach.x, az = state.logistics.smeltApproach.z}, 92, "furnace_line")
+        enqueueStrategic("setup_furnace", {fx = state.logistics.furnace.x, fz = state.logistics.furnace.z, ax = state.logistics.smeltApproach.x, az = state.logistics.smeltApproach.z}, "furnace_line", ctx)
       end
     else
       if not openTaskByExclusive("smelt_charcoal") and chestCount("minecraft:charcoal") < CHARCOAL_TARGET then
-        enqueue("smelt_charcoal", {batches = 8, ax = state.logistics.smeltApproach.x, az = state.logistics.smeltApproach.z}, 90, "smelt_charcoal")
+        enqueueStrategic("smelt_charcoal", {batches = 8, ax = state.logistics.smeltApproach.x, az = state.logistics.smeltApproach.z}, "smelt_charcoal", ctx)
       end
     end
     if needs.needWoodForSmelt and needs.canTargetLog and not openTaskByExclusive("gather_log") then
-      enqueue("gather_log", {tx = needs.logX, tz = needs.logZ, ty = needs.logY or 0}, 88, "gather_log")
+      enqueueStrategic("gather_log", {tx = needs.logX, tz = needs.logZ, ty = needs.logY or 0}, "gather_log", ctx)
     end
   end
   if needs.needCobbleForFurnace and not openTaskByExclusive("mine_cobble_strip") then
@@ -474,55 +702,59 @@ local function planTick()
         break
       end
     end
-    enqueue("mine_cobble", {steps = 10, strip = idx, gateX = gateX}, 75, "mine_cobble_strip")
+    enqueueStrategic("mine_cobble", {steps = 10, strip = idx, gateX = gateX}, "mine_cobble_strip", ctx)
   end
   if cobble > COBBLE_SOFT_CAP * 0.5 and coal > COAL_SOFT_CAP then
-    if not openTaskByKind("explore") and mapCountKnown() < 120 then
-      state.planner.exploreDir = (state.planner.exploreDir + 1) % 4
-      enqueue("explore", {steps = 6, preferDir = state.planner.exploreDir}, 35, nil)
+    if not openTaskByKind("explore") and mapCountKnown() < MAP_EXPLORE_GOAL then
+      local ed = (state.planner.exploreDir or 0) + 1
+      state.planner.exploreDir = ed % 4
+      enqueueStrategic("explore", {steps = 8, preferDir = state.planner.exploreDir}, nil, ctx)
     end
   else
     if not openTaskByKind("mine") and cobble < COBBLE_SOFT_CAP then
-      enqueue("mine", {steps = 8, strip = (state.planner.mineStripIndex or 0)}, 55, nil)
+      enqueueStrategic("mine", {steps = 8, strip = (state.planner.mineStripIndex or 0)}, nil, ctx)
     end
   end
   state.farm = state.farm or {built = false, slots = cloneFarmSlots(FARM_SLOTS)}
   if not state.farm.slots or #state.farm.slots == 0 then
     state.farm.slots = cloneFarmSlots(FARM_SLOTS)
   end
+  local farmIdle = needs.fuelLow and coal < 14
   if not state.farm.built then
     if chestSaplingCount() >= 6 and chestCount("minecraft:dirt") >= 20 and not openTaskByExclusive("farm_build") then
-      enqueue("farm_build", {slots = cloneFarmSlots(state.farm.slots)}, 87, "farm_build")
+      enqueueStrategic("farm_build", {slots = cloneFarmSlots(state.farm.slots)}, "farm_build", ctx)
     end
-    if not openTaskByExclusive("farm_replant") then
-      enqueue("farm_replant", {x = FARM_CX, z = FARM_CZ}, 54, "farm_replant")
-    end
-    if not openTaskByExclusive("farm_harvest") then
-      enqueue("farm_harvest", {x = FARM_CX, z = FARM_CZ}, 52, "farm_harvest")
+    if not farmIdle then
+      if not openTaskByExclusive("farm_replant") then
+        enqueueStrategic("farm_replant", {x = FARM_CX, z = FARM_CZ}, "farm_replant", ctx)
+      end
+      if not openTaskByExclusive("farm_harvest") then
+        enqueueStrategic("farm_harvest", {x = FARM_CX, z = FARM_CZ}, "farm_harvest", ctx)
+      end
     end
   else
     if not openTaskByExclusive("farm_cycle") then
-      enqueue("farm_cycle", {slots = cloneFarmSlots(state.farm.slots)}, 64, "farm_cycle")
+      enqueueStrategic("farm_cycle", {slots = cloneFarmSlots(state.farm.slots)}, "farm_cycle", ctx)
     end
   end
   local canCraftAdvanced = chestCount("minecraft:redstone") > 0 and chestCount("minecraft:glass_pane") > 0
   if canCraftAdvanced and not openTaskByExclusive("craft_computer_advanced") then
-    enqueue("craft", {recipe = "computer_advanced"}, 50, "craft_computer_advanced")
+    enqueueStrategic("craft", {recipe = "computer_advanced"}, "craft_computer_advanced", ctx)
   end
   if chestCount("computercraft:computer_advanced") > 0 and chestCount("minecraft:chest") > 0 and not openTaskByExclusive("craft_turtle_advanced") then
-    enqueue("craft", {recipe = "turtle_advanced"}, 48, "craft_turtle_advanced")
+    enqueueStrategic("craft", {recipe = "turtle_advanced"}, "craft_turtle_advanced", ctx)
   end
   if chestCount("minecraft:redstone") > 2 and chestCount("minecraft:paper") > 0 and not openTaskByExclusive("craft_disk") then
-    enqueue("craft", {recipe = "disk"}, 45, "craft_disk")
+    enqueueStrategic("craft", {recipe = "disk"}, "craft_disk", ctx)
   end
   if chestCount("minecraft:iron_ingot") > 0 and chestCount("minecraft:stone") > 8 and not openTaskByExclusive("craft_drive") then
-    enqueue("craft", {recipe = "disk_drive"}, 44, "craft_drive")
+    enqueueStrategic("craft", {recipe = "disk_drive"}, "craft_drive", ctx)
   end
   if chestCount("minecraft:stone") > 8 and chestCount("minecraft:ender_pearl") > 0 and not openTaskByExclusive("craft_modem") then
-    enqueue("craft", {recipe = "wireless_modem_normal"}, 43, "craft_modem")
+    enqueueStrategic("craft", {recipe = "wireless_modem_normal"}, "craft_modem", ctx)
   end
   if n < TARGET_DRONES and chestCount("computercraft:turtle_advanced") > 0 and not openTaskByExclusive("bootstrap") then
-    enqueue("bootstrap", {}, 40, "bootstrap")
+    enqueueStrategic("bootstrap", {}, "bootstrap", ctx)
   end
 end
 
@@ -575,6 +807,12 @@ local function pickTask(drone)
           skip = true
         end
         if not skip and (t.kind == "mine_cobble" or t.kind == "mine") and d and (d.fuel or 0) < MIN_FUEL + 20 then
+          skip = true
+        end
+        if not skip and t.kind == "craft" and d and (d.fuel or 0) < MIN_FUEL + 80 then
+          skip = true
+        end
+        if not skip and t.kind == "bootstrap" and d and (d.fuel or 0) < MIN_FUEL + 100 then
           skip = true
         end
         if not skip then
@@ -643,8 +881,15 @@ local function applyMapDelta(delta)
   local count = 0
   for _, v in ipairs(delta or {}) do
     if inBounds(v.x, v.z) then
-      state.world.voxels[voxelKey(v.x, v.y, v.z)] = {
-        t = v.t or "unknown",
+      local vk = voxelKey(v.x, v.y, v.z)
+      local prev = state.world.voxels[vk]
+      local oldT = prev and prev.t
+      local newT = v.t or "unknown"
+      if oldT ~= newT then
+        indexDeltaBlock(oldT, newT)
+      end
+      state.world.voxels[vk] = {
+        t = newT,
         by = v.by,
         ts = os.epoch("utc"),
       }
