@@ -329,6 +329,15 @@ local function droneBusyKind(droneId)
   return nil
 end
 
+local function findAssignedTask(droneId)
+  for _, t in ipairs(state.tasks) do
+    if t.status == "assigned" and t.assignedTo == droneId then
+      return t
+    end
+  end
+  return nil
+end
+
 local function planNeeds()
   local fuelLow = false
   for _, d in pairs(state.drones) do
@@ -534,6 +543,7 @@ local function upsertDrone(id, data)
     canon = {x = 0, y = 0, z = 0, dir = 0},
     drift = 0,
     chestSummary = nil,
+    lastNoTaskLog = 0,
   }
   local d = state.drones[id]
   d.online = true
@@ -656,7 +666,14 @@ local function handle(id, msg)
   if msg.k == "need_task" then
     local t = pickTask({id = id})
     if not t then
-      log("no_task_for drone=" .. tostring(id))
+      t = findAssignedTask(id)
+    end
+    if not t then
+      local now = os.epoch("utc")
+      if now - (d.lastNoTaskLog or 0) > 4000 then
+        d.lastNoTaskLog = now
+        log("no_task_for drone=" .. tostring(id))
+      end
     end
     send(id, "task", {task = t, canonPos = d.canon})
     return

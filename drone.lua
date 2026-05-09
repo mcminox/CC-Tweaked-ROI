@@ -22,7 +22,7 @@ local protectedFragments = {
 }
 
 local function log(msg)
-  print(("[DRONE %d] %s"):format(os.epoch("utc"), msg))
+  print(("[DRONE #%d] %s"):format(os.getComputerID(), msg))
 end
 
 local recipes = {
@@ -1036,9 +1036,10 @@ while true do
       state.task = msg.d.task
       applyCanonical(msg.d and msg.d.canonPos)
       if state.task then
-        log("received task kind=" .. tostring(state.task.kind) .. " id=" .. tostring(state.task.id))
+        log("task " .. tostring(state.task.kind) .. " id=" .. tostring(state.task.id))
       else
-        log("received no task")
+        log("no task (idle)")
+        sleep(0.6)
       end
     end
   end
