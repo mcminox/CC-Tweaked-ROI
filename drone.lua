@@ -377,7 +377,7 @@ end
 
 local function ensureSaplingsFromChest(need)
   while countSaplingsInv() < need do
-    local chest, err = scanChest()
+    local chest, err = scanChest(true)
     if not chest then
       return false, err
     end
@@ -797,7 +797,7 @@ local function cloneChestList(list)
   return out
 end
 
-local function getChestSnapshot()
+local function getChestSnapshot(quiet)
   if not ensureHomeChestAccessible() then
     return nil, nil, "home_chest_missing"
   end
@@ -818,12 +818,14 @@ local function getChestSnapshot()
     totalItems = totalItems + (item.count or 0)
     summary[item.name] = (summary[item.name] or 0) + item.count
   end
-  log("chest_scan stacks=" .. tostring(totalStacks) .. " items=" .. tostring(totalItems))
+  if not quiet then
+    log("chest_scan stacks=" .. tostring(totalStacks) .. " items=" .. tostring(totalItems))
+  end
   return summary, cloneChestList(list)
 end
 
-local function scanChest()
-  local s, _, err = getChestSnapshot()
+local function scanChest(quiet)
+  local s, _, err = getChestSnapshot(quiet)
   if err then
     return nil, err
   end
@@ -924,7 +926,7 @@ local function transferNamedFromChest(name, needMore)
 end
 
 local function ensureItemsFromChest(req)
-  local chest, err = scanChest()
+  local chest, err = scanChest(true)
   if not chest then
     return false, err
   end
