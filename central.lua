@@ -321,15 +321,48 @@ local function droneRole(id)
   return "miner"
 end
 
+local function deriveRole(d)
+  if not d.capabilities then
+    d.capabilities = {craft = false, mine = true, farm = true}
+  end
+  if d.capabilities.craft then
+    d.role = "crafter"
+    return
+  end
+  d.role = droneRole(d.id)
+end
+
+local function crafterOnline()
+  for _, d in pairs(state.drones) do
+    if d.online and d.role == "crafter" then
+      return true
+    end
+  end
+  return false
+end
+
 local function effectivePrio(t, droneId)
   local p = t.prio or 0
-  local r = droneRole(droneId)
+  local dd = state.drones[droneId]
+  local r = dd and dd.role or droneRole(droneId)
   local k = t.kind or ""
+  if r == "crafter" and (k == "craft" or k == "bootstrap") then
+    p = p + 18
+  end
+  if r ~= "crafter" and (k == "craft" or k == "bootstrap") then
+    p = p - 55
+  end
   if r == "farmer" and (k == "farm_build" or k == "farm_cycle" or k == "farm_replant" or k == "farm_harvest") then
     p = p + 12
   end
   if r == "miner" and (k == "mine" or k == "mine_cobble" or k == "gather_log") then
     p = p + 10
+  end
+  if r == "crafter" and (k == "mine" or k == "mine_cobble" or k == "gather_log" or k == "survey" or k == "explore") then
+    p = p - 14
+  end
+  if r == "crafter" and (k == "farm_build" or k == "farm_cycle" or k == "farm_replant" or k == "farm_harvest") then
+    p = p - 12
   end
   if not (state.boot and state.boot.done) then
     if k == "survey" then
@@ -737,24 +770,26 @@ local function planTick()
       enqueueStrategic("farm_cycle", {slots = cloneFarmSlots(state.farm.slots)}, "farm_cycle", ctx)
     end
   end
-  local canCraftAdvanced = chestCount("minecraft:redstone") > 0 and chestCount("minecraft:glass_pane") > 0
-  if canCraftAdvanced and not openTaskByExclusive("craft_computer_advanced") then
-    enqueueStrategic("craft", {recipe = "computer_advanced"}, "craft_computer_advanced", ctx)
-  end
-  if chestCount("computercraft:computer_advanced") > 0 and chestCount("minecraft:chest") > 0 and not openTaskByExclusive("craft_turtle_advanced") then
-    enqueueStrategic("craft", {recipe = "turtle_advanced"}, "craft_turtle_advanced", ctx)
-  end
-  if chestCount("minecraft:redstone") > 2 and chestCount("minecraft:paper") > 0 and not openTaskByExclusive("craft_disk") then
-    enqueueStrategic("craft", {recipe = "disk"}, "craft_disk", ctx)
-  end
-  if chestCount("minecraft:iron_ingot") > 0 and chestCount("minecraft:stone") > 8 and not openTaskByExclusive("craft_drive") then
-    enqueueStrategic("craft", {recipe = "disk_drive"}, "craft_drive", ctx)
-  end
-  if chestCount("minecraft:stone") > 8 and chestCount("minecraft:ender_pearl") > 0 and not openTaskByExclusive("craft_modem") then
-    enqueueStrategic("craft", {recipe = "wireless_modem_normal"}, "craft_modem", ctx)
-  end
-  if n < TARGET_DRONES and chestCount("computercraft:turtle_advanced") > 0 and not openTaskByExclusive("bootstrap") then
-    enqueueStrategic("bootstrap", {}, "bootstrap", ctx)
+  if crafterOnline() then
+    local canCraftAdvanced = chestCount("minecraft:redstone") > 0 and chestCount("minecraft:glass_pane") > 0
+    if canCraftAdvanced and not openTaskByExclusive("craft_computer_advanced") then
+      enqueueStrategic("craft", {recipe = "computer_advanced"}, "craft_computer_advanced", ctx)
+    end
+    if chestCount("computercraft:computer_advanced") > 0 and chestCount("minecraft:chest") > 0 and not openTaskByExclusive("craft_turtle_advanced") then
+      enqueueStrategic("craft", {recipe = "turtle_advanced"}, "craft_turtle_advanced", ctx)
+    end
+    if chestCount("minecraft:redstone") > 2 and chestCount("minecraft:paper") > 0 and not openTaskByExclusive("craft_disk") then
+      enqueueStrategic("craft", {recipe = "disk"}, "craft_disk", ctx)
+    end
+    if chestCount("minecraft:iron_ingot") > 0 and chestCount("minecraft:stone") > 8 and not openTaskByExclusive("craft_drive") then
+      enqueueStrategic("craft", {recipe = "disk_drive"}, "craft_drive", ctx)
+    end
+    if chestCount("minecraft:stone") > 8 and chestCount("minecraft:ender_pearl") > 0 and not openTaskByExclusive("craft_modem") then
+      enqueueStrategic("craft", {recipe = "wireless_modem_normal"}, "craft_modem", ctx)
+    end
+    if n < TARGET_DRONES and chestCount("computercraft:turtle_advanced") > 0 and not openTaskByExclusive("bootstrap") then
+      enqueueStrategic("bootstrap", {}, "bootstrap", ctx)
+    end
   end
 end
 
@@ -815,6 +850,22 @@ local function pickTask(drone)
         if not skip and t.kind == "bootstrap" and d and (d.fuel or 0) < MIN_FUEL + 100 then
           skip = true
         end
+        if not skip and d and d.role == "crafter" then
+          if t.kind == "mine" or t.kind == "mine_cobble" or t.kind == "gather_log" or t.kind == "survey" or t.kind == "explore" then
+            skip = true
+          end
+          if t.kind == "farm_build" or t.kind == "farm_cycle" or t.kind == "farm_replant" or t.kind == "farm_harvest" then
+            skip = true
+          end
+        end
+        if not skip and d and d.role ~= "crafter" then
+          if t.kind == "craft" or t.kind == "bootstrap" then
+            skip = true
+          end
+        end
+        if not skip and (t.kind == "craft" or t.kind == "bootstrap") and d and (not d.capabilities or not d.capabilities.craft) then
+          skip = true
+        end
         if not skip then
           t.status = "assigned"
           t.assignedTo = drone.id
@@ -845,6 +896,10 @@ local function upsertDrone(id, data)
     drift = 0,
     chestSummary = nil,
     lastNoTaskLog = 0,
+    capabilities = {craft = false, mine = true, farm = true},
+    role = "miner",
+    lastTaskKind = nil,
+    taskHistory = {},
   }
   local d = state.drones[id]
   d.online = true
@@ -852,6 +907,13 @@ local function upsertDrone(id, data)
   if data and data.fuel then
     d.fuel = data.fuel
   end
+  if data and type(data.capabilities) == "table" then
+    d.capabilities = d.capabilities or {craft = false, mine = true, farm = true}
+    for k, v in pairs(data.capabilities) do
+      d.capabilities[k] = v
+    end
+  end
+  deriveRole(d)
   if data.chestSlots then
     mergeChestSlots(data.chestSlots, id)
   elseif data.chestSummary then
@@ -920,6 +982,12 @@ local function markTaskDone(taskId, droneId)
       local dd = state.drones[droneId]
       if dd then
         dd.busy = nil
+        dd.lastTaskKind = t.kind
+        dd.taskHistory = dd.taskHistory or {}
+        dd.taskHistory[#dd.taskHistory + 1] = {kind = t.kind, taskId = t.id, at = os.epoch("utc")}
+        while #dd.taskHistory > 16 do
+          table.remove(dd.taskHistory, 1)
+        end
       end
       return
     end
@@ -962,7 +1030,7 @@ local function handle(id, msg)
     return
   end
   if msg.k == "register" then
-    log("register drone=" .. tostring(id) .. " mapCells=" .. tostring(mapCountKnown()) .. " boot=" .. tostring(not (state.boot and state.boot.done)))
+    log("register id=" .. tostring(id) .. " role=" .. tostring(d.role) .. " craft=" .. tostring(d.capabilities and d.capabilities.craft) .. " map=" .. tostring(mapCountKnown()) .. " boot=" .. tostring(not (state.boot and state.boot.done)))
     send(id, "register_ack", {
       ok = true,
       canonPos = d.canon,

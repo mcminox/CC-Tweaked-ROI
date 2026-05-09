@@ -80,6 +80,15 @@ local function recv(timeout)
   return id, msg
 end
 
+local function computeCapabilities()
+  local c = {craft = false, mine = true, farm = true}
+  local lbl = string.lower(tostring(os.getComputerLabel() or ""))
+  if fs.exists("crafter") or string.find(lbl, "craft", 1, true) or string.find(lbl, "крафт", 1, true) then
+    c.craft = true
+  end
+  return c
+end
+
 local function discover()
   if state.server then return state.server end
   local ids = {rednet.lookup(PROTOCOL)}
@@ -899,6 +908,9 @@ local function taskRefuel()
 end
 
 local function taskCraft(payload)
+  if not state.capabilities or not state.capabilities.craft then
+    return false, "no_craft_upgrade"
+  end
   local r = payload and payload.recipe
   log("task craft recipe=" .. tostring(r))
   if r == "turtle_advanced" and countByName("computercraft:computer_advanced") == 0 then
@@ -1017,6 +1029,9 @@ local function taskGatherLog(t)
 end
 
 local function taskBootstrap()
+  if not state.capabilities or not state.capabilities.craft then
+    return false, "no_craft_upgrade"
+  end
   log("task bootstrap")
   local ok1 = craft("disk")
   local ok2 = craft("disk_drive")
@@ -1094,12 +1109,13 @@ end
 
 if not openModem() then error("No modem") end
 load()
+state.capabilities = state.capabilities or computeCapabilities()
 if not discover() then
   log("Waiting for central...")
   while not discover() do sleep(1) end
 end
 log("register to central id=" .. tostring(state.server))
-send("register", {pos = state.pos, fuel = turtle.getFuelLevel(), anchorHome = (state.pos.x == 0 and state.pos.y == 0 and state.pos.z == 0)})
+send("register", {pos = state.pos, fuel = turtle.getFuelLevel(), anchorHome = (state.pos.x == 0 and state.pos.y == 0 and state.pos.z == 0), capabilities = state.capabilities})
 sleep(0.3)
 pushChestToCentral()
 local hb = 0
@@ -1123,6 +1139,7 @@ while true do
       anchorHome = (state.pos.x == 0 and state.pos.y == 0 and state.pos.z == 0),
       chestSummary = chestSum,
       chestSlots = chestSlots,
+      capabilities = state.capabilities,
     })
     send("map", {delta = mapDelta(), by = os.getComputerID()})
     hb = os.clock()
