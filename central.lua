@@ -8,6 +8,7 @@ local MAX_CHUNK = 1
 local STATE_FILE = "central_state.db"
 local SAVE_INTERVAL = 2
 local PLAN_INTERVAL = 1.2
+local BOOT_MIN_VOXELS = 72
 local FARM_CX = 4
 local FARM_CZ = 4
 local FARM_RADIUS = 4
@@ -53,6 +54,8 @@ local state = {
     exploreDir = 0,
   },
   farm = {built = false, slots = {}},
+  boot = {done = false},
+  inventory = {},
 }
 
 local function log(msg)
@@ -98,6 +101,8 @@ local function loadState()
     else
       state.farm.slots = cloneFarmSlots(state.farm.slots)
     end
+    state.boot = state.boot or {done = false}
+    state.inventory = state.inventory or {}
   end
 end
 
@@ -222,6 +227,40 @@ local function mergeChest(summary)
   end
 end
 
+local function mergeChestSlots(slots, sourceId)
+  if type(slots) ~= "table" then
+    return
+  end
+  state.inventory = state.inventory or {}
+  state.inventory.homeChest = {
+    slots = slots,
+    updatedAt = os.epoch("utc"),
+    byDrone = sourceId,
+  }
+  state.chest = {}
+  for _, item in pairs(slots) do
+    if type(item) == "table" and item.name then
+      state.chest[item.name] = (state.chest[item.name] or 0) + (item.count or 0)
+    end
+  end
+end
+
+local function checkWarmupComplete()
+  state.boot = state.boot or {done = false}
+  if state.boot.done then
+    return true
+  end
+  local v = mapCountKnown()
+  local chestOk = state.inventory.homeChest and state.inventory.homeChest.updatedAt
+  if v >= BOOT_MIN_VOXELS and chestOk then
+    state.boot.done = true
+    state.boot.completedAt = os.epoch("utc")
+    log("boot: place memory ready voxels=" .. tostring(v))
+    return true
+  end
+  return false
+end
+
 local function chestSaplingCount()
   local n = 0
   for name, c in pairs(state.chest) do
@@ -248,6 +287,14 @@ local function effectivePrio(t, droneId)
   end
   if r == "miner" and (k == "mine" or k == "mine_cobble" or k == "gather_log") then
     p = p + 10
+  end
+  if not (state.boot and state.boot.done) then
+    if k == "survey" then
+      p = p + 30
+    end
+    if k == "explore" then
+      p = p + 22
+    end
   end
   return p
 end
@@ -381,11 +428,27 @@ local function planTick()
   if n == 0 then
     return
   end
+  state.boot = state.boot or {done = false}
+  state.inventory = state.inventory or {}
   local needs = planNeeds()
   local cobble = needs.cobble
   local coal = needs.coal
   if needs.fuelLow and not openTaskByKind("refuel") then
     enqueue("refuel", {}, 98, nil)
+  end
+  if not checkWarmupComplete() then
+    if not openTaskByExclusive("survey_pass") then
+      enqueue("survey", {
+        steps = 18,
+        preferDir = state.planner.exploreDir or 0,
+      }, 97, "survey_pass")
+    end
+    if mapCountKnown() < BOOT_MIN_VOXELS and not openTaskByKind("explore") then
+      local ed = state.planner.exploreDir or 0
+      enqueue("explore", {steps = 16, preferDir = ed}, 91, nil)
+      state.planner.exploreDir = (ed + 1) % 4
+    end
+    return
   end
   if needs.needCharcoal then
     if not furnacePlacedOnMap() then
@@ -431,11 +494,11 @@ local function planTick()
     if chestSaplingCount() >= 6 and chestCount("minecraft:dirt") >= 20 and not openTaskByExclusive("farm_build") then
       enqueue("farm_build", {slots = cloneFarmSlots(state.farm.slots)}, 87, "farm_build")
     end
-    if not openTaskByKind("farm_replant") then
-      enqueue("farm_replant", {x = FARM_CX, z = FARM_CZ}, 54, nil)
+    if not openTaskByExclusive("farm_replant") then
+      enqueue("farm_replant", {x = FARM_CX, z = FARM_CZ}, 54, "farm_replant")
     end
-    if not openTaskByKind("farm_harvest") then
-      enqueue("farm_harvest", {x = FARM_CX, z = FARM_CZ}, 52, nil)
+    if not openTaskByExclusive("farm_harvest") then
+      enqueue("farm_harvest", {x = FARM_CX, z = FARM_CZ}, 52, "farm_harvest")
     end
   else
     if not openTaskByExclusive("farm_cycle") then
@@ -551,7 +614,9 @@ local function upsertDrone(id, data)
   if data and data.fuel then
     d.fuel = data.fuel
   end
-  if data and data.chestSummary then
+  if data.chestSlots then
+    mergeChestSlots(data.chestSlots, id)
+  elseif data.chestSummary then
     d.chestSummary = data.chestSummary
     mergeChest(data.chestSummary)
   end
@@ -641,8 +706,18 @@ local function handle(id, msg)
   end
   local payload = msg.d or {}
   local d = upsertDrone(id, payload)
+  if msg.k == "chest_scan" then
+    if payload.slots then
+      mergeChestSlots(payload.slots, id)
+    end
+    if payload.summary then
+      mergeChest(payload.summary)
+    end
+    send(id, "chest_scan_ack", {ok = true, knownCells = mapCountKnown()})
+    return
+  end
   if msg.k == "register" then
-    log("register drone=" .. tostring(id) .. " mapCells=" .. tostring(mapCountKnown()))
+    log("register drone=" .. tostring(id) .. " mapCells=" .. tostring(mapCountKnown()) .. " boot=" .. tostring(not (state.boot and state.boot.done)))
     send(id, "register_ack", {
       ok = true,
       canonPos = d.canon,
@@ -695,7 +770,7 @@ end
 loadState()
 sanitizeTaskPayloads()
 rednet.host(PROTOCOL, "central")
-log("Swarm central online mapCells=" .. tostring(mapCountKnown()))
+log("Swarm central online mapCells=" .. tostring(mapCountKnown()) .. " boot_done=" .. tostring(state.boot and state.boot.done))
 local lastTick = os.clock()
 local lastSave = os.clock()
 while true do

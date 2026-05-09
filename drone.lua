@@ -553,15 +553,35 @@ local function countByName(name)
   return n
 end
 
-local function scanChest()
+local function isHomeStorageDown(name)
+  if not name then
+    return false
+  end
+  return string.find(name, "chest", 1, true) ~= nil or string.find(name, "barrel", 1, true) ~= nil
+end
+
+local function cloneChestList(list)
+  if not list then
+    return nil
+  end
+  local out = {}
+  for k, item in pairs(list) do
+    if item and item.name then
+      out[k] = {name = item.name, count = item.count or 0}
+    end
+  end
+  return out
+end
+
+local function getChestSnapshot()
   goHome()
   local block = inspectDown()
-  if not block or not string.find(block, "chest", 1, true) then
-    return nil, "home_chest_missing"
+  if not block or not isHomeStorageDown(block) then
+    return nil, nil, "home_chest_missing"
   end
   local inv = peripheral.wrap("bottom")
   if not inv or type(inv.list) ~= "function" then
-    return nil, "home_chest_no_inventory_api"
+    return nil, nil, "home_chest_no_inventory_api"
   end
   local list = inv.list()
   local summary = {}
@@ -573,7 +593,24 @@ local function scanChest()
     summary[item.name] = (summary[item.name] or 0) + item.count
   end
   log("chest_scan stacks=" .. tostring(totalStacks) .. " items=" .. tostring(totalItems))
-  return summary
+  return summary, cloneChestList(list)
+end
+
+local function scanChest()
+  local s, _, err = getChestSnapshot()
+  if err then
+    return nil, err
+  end
+  return s
+end
+
+local function pushChestToCentral()
+  local sum, slots, err = getChestSnapshot()
+  if err then
+    log("chest_push skip " .. tostring(err))
+    return
+  end
+  send("chest_scan", {summary = sum, slots = slots})
 end
 
 local function findSlotForPull(name)
@@ -773,6 +810,27 @@ local function taskExplore(t)
     if not ok then goHome() return false, err end
   end
   goHome()
+  return true
+end
+
+local function taskSurvey(t)
+  log("task survey")
+  pushChestToCentral()
+  local pd = t.payload or {}
+  local steps = pd.steps or 16
+  local pref = pd.preferDir or 0
+  faceDir(pref % 4)
+  for i = 1, steps do
+    local ok, err = forward()
+    if not ok then
+      break
+    end
+    if i % 2 == 0 or i == steps then
+      send("map", {delta = mapDelta(), by = os.getComputerID()})
+    end
+  end
+  goHome()
+  pushChestToCentral()
   return true
 end
 
@@ -1000,6 +1058,7 @@ local function execute(task)
   if task.kind == "mine" then return taskMine(task) end
   if task.kind == "mine_cobble" then return taskMineCobble(task) end
   if task.kind == "explore" then return taskExplore(task) end
+  if task.kind == "survey" then return taskSurvey(task) end
   if task.kind == "farm_build" then return taskFarmBuild(task) end
   if task.kind == "farm_cycle" then return taskFarmCycle(task) end
   if task.kind == "farm_replant" then return taskReplant() end
@@ -1041,15 +1100,21 @@ if not discover() then
 end
 log("register to central id=" .. tostring(state.server))
 send("register", {pos = state.pos, fuel = turtle.getFuelLevel(), anchorHome = (state.pos.x == 0 and state.pos.y == 0 and state.pos.z == 0)})
+sleep(0.3)
+pushChestToCentral()
 local hb = 0
 while true do
   if not state.server then discover() end
   if os.clock() - hb >= 3 then
     state.hbTick = (state.hbTick or 0) + 1
     local chestSum = nil
+    local chestSlots = nil
     if state.hbTick % 2 == 0 then
-      local s = scanChest()
-      if s then chestSum = s end
+      local s, slots, err = getChestSnapshot()
+      if not err then
+        chestSum = s
+        chestSlots = slots
+      end
     end
     log("heartbeat fuel=" .. tostring(turtle.getFuelLevel()))
     send("heartbeat", {
@@ -1057,6 +1122,7 @@ while true do
       fuel = turtle.getFuelLevel(),
       anchorHome = (state.pos.x == 0 and state.pos.y == 0 and state.pos.z == 0),
       chestSummary = chestSum,
+      chestSlots = chestSlots,
     })
     send("map", {delta = mapDelta(), by = os.getComputerID()})
     hb = os.clock()
